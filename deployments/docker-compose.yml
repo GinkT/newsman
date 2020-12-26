@@ -7,6 +7,8 @@ services:
       dockerfile: deployments/Dockerfile
     ports:
       - "8080:8080"
+    env_file:
+      - ../config/config.env
     depends_on:
       - postgres
     links:

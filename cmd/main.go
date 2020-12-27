@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	//"time"
-
 	_ "github.com/lib/pq"
 	"github.com/mailru/dbr"
 )
@@ -61,6 +59,9 @@ var (
 		"Просто <b>нажми на кнопку</b> с темой от которой хочет отписаться и мы всё сделаем!\n" +
 		"Помни что ты всегда сможешь снова запросить у нас новости по этой теме!"
 	unsubscribeConfirmMessage = "Мы успешно отписали тебя от <b>%s</b>. Помни, что ты всегда можешь возобновить подписку на данную тему! ;)"
+	newArticleMessage = "<b>Раздел:</b> %s\n<b>Название:</b> %s\n\n%s\n" +
+		"<b>От:</b> %s\n" +
+		"<i>%s</i>"
 )
 
 var subscribeKeyboardMarkup = tgbotapi.NewInlineKeyboardMarkup(
@@ -144,20 +145,21 @@ func main() {
 				log.Infof("Forming message for users: %+v", requestMap[tag])
 				for _, userId := range requestMap[tag] {
 					for _, article := range response.Articles {
-						contains, err := db.IsSubscribeContainsTitle(s, userId, tag, article.Title)
+						contains, err := db.IsSubscribeContainsArticle(s, userId, tag, article.Title)
 						if err != nil {
-							log.Errorln("db err:", err)
+							log.Errorln("db err IsSubscribeContainsArticle:", err)
 							continue
 						}
 						if !contains {
 							err = db.AddReadenArticleToSubscribe(s, userId, tag, article.Title)
 							if err != nil {
-								log.Errorln("db err:", err)
+								log.Errorln("db err AddReadenArticle:", err)
 								continue
 							}
 							log.Infof("Forming message for %d", userId)
-							msgToSend := tgbotapi.NewMessage(userId, fmt.Sprintf("New %s response only for you, bro ^-^\n%s\n%s\n%s", tag,
-								article.Description, article.Url, article.UrlToImage))
+							msgToSend := tgbotapi.NewMessage(userId, fmt.Sprintf(newArticleMessage, tag,
+								article.Title, article.Description, article.Author, article.Url))
+							msgToSend.ParseMode = "html"
 							_, err = bot.Send(msgToSend)
 							if err != nil {
 								log.Errorln("error sending message ticker:", err)
@@ -168,23 +170,21 @@ func main() {
 					}
 				}
 			}
-
 		}
 	}()
 
 	for update := range updates {
-		if update.CallbackQuery != nil{
-			log.Println("callback query", update)
-
+		if update.CallbackQuery != nil {
 			bot.AnswerCallbackQuery(tgbotapi.NewCallback(update.CallbackQuery.ID,update.CallbackQuery.Data))
 
 			var callbackMsg tgbotapi.MessageConfig
 			if strings.HasPrefix(update.CallbackQuery.Data, "unsub ") {
-				if err = db.DeleteSubscribeFromSubscribes(s, update.CallbackQuery.Message.Chat.ID, strings.TrimLeft(update.CallbackQuery.Data, "unsub ")); err != nil {
+				log.Infof("Trying to delete subscribe for tag %s, data %s", strings.TrimPrefix(update.CallbackQuery.Data, "unsub "), update.CallbackQuery.Data)
+				if err = db.DeleteSubscribeFromSubscribes(s, update.CallbackQuery.Message.Chat.ID, strings.TrimPrefix(update.CallbackQuery.Data, "unsub ")); err != nil {
 					log.Errorln("error sending message:", err)
 					continue
 				}
-				callbackMsg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf(unsubscribeConfirmMessage, strings.TrimLeft(update.CallbackQuery.Data, "unsub ")))
+				callbackMsg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf(unsubscribeConfirmMessage, strings.TrimPrefix(update.CallbackQuery.Data, "unsub ")))
 				callbackMsg.ParseMode = "html"
 				_, err = bot.Send(callbackMsg)
 				if err != nil {
@@ -228,7 +228,7 @@ func main() {
 			msgToSend.ParseMode = "html"
 			msgToSend.ReplyMarkup = subscribeKeyboardMarkup
 		case "/unsubscribe":
-			tags, err := db.SelectUsersSubscribes(s, update.Message.Chat.ID)
+			tags, err := db.SelectUsersSubscribeTags(s, update.Message.Chat.ID)
 			if err != nil {
 				log.Errorln("db error:", err)
 				continue

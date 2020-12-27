@@ -40,7 +40,7 @@ func AddReadenArticleToSubscribe(s *dbr.Session, userId int64, tag, article stri
 	return
 }
 
-func IsSubscribeContainsTitle(s *dbr.Session, userId int64, tag, article string) (contains bool, err error) {
+func IsSubscribeContainsArticle(s *dbr.Session, userId int64, tag, article string) (contains bool, err error) {
 	selectStr := "readen_articles @> ARRAY['" + article + "']"
 	err = s.Select(selectStr).
 		From("subscribes").
@@ -49,7 +49,7 @@ func IsSubscribeContainsTitle(s *dbr.Session, userId int64, tag, article string)
 	return
 }
 
-func SelectUsersSubscribes(s *dbr.Session, userId int64) (subscribedTags []string, err error) {
+func SelectUsersSubscribeTags(s *dbr.Session, userId int64) (subscribedTags []string, err error) {
 	_, err = s.Select("tag").
 		From("subscribes").
 		Where("user_id = ?", userId).

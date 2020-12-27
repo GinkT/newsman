@@ -8,6 +8,10 @@ import (
 	"github.com/go-telegram-bot-api/telegram-bot-api"
 	log "github.com/sirupsen/logrus"
 	"net/http"
+	"strings"
+	"time"
+
+	//"time"
 
 	_ "github.com/lib/pq"
 	"github.com/mailru/dbr"
@@ -35,17 +39,64 @@ func init() {
 	}
 }
 
+var (
+	helpMessage = "Снова приветули! Это <b>Newsman</b>, я расскажу тебе немного о том, как я работаю!\n\n" +
+		"Я запоминаю все интересные темы, которые ты выбрал, общаясь со мной в чатике. " +
+		"Раз в час я провожу сканирование всех интересных новостей на диком западе. " +
+		"Естественно сканирую новости не я саморучно, а команда индусов-операционистов!\n\n" +
+		"Эх, я кажется немного увлекся. Кстати, я не работаю в тех странах где запрещена работорговля, <b>даже не спрашивай почему!</b>\n\n" +
+		"Давай ка я напомню тебе как пользоваться мной:\n" +
+		"<i>/subscribe</i> - позволяет вывести список доступных тем и произвести подписку\n" +
+		"<i>/unsubscribe</i> - позволяет отменить уже созданную подписку на какую либо тему\n" +
+		"<i>/help</i> - прочитать мой прекрасный монолог ещё раз\n\n"
+	startMessage = "Добро пожаловать на страницу самого лучшего новостного бота <b>Newsman!</b>\n\nТебе доступны две команды из списка:\n" +
+	"<i>/subscribe</i> - позволяет вывести список доступных тем и произвести подписку\n" +
+	"<i>/unsubscribe</i> - позволяет отменить уже созданную подписку на какую либо тему\n\n" +
+	"Если снова понадобится помощь - просто набери <i>/help</i>!"
+	subscribeMessage = "Соскучился по свежим новостям, <b>%s</b>? Мы очень рады что ты пользуешься нашим ботом ;)\n\n" +
+		"\tВыбери одну из указанных тем для подписки:"
+	confirmSubscribeMessage = "%s? Хороший выбор, моя любимая тема, часто обсуждаем с ребятами в качалке ^-^\nМы уже совсем скоро закидаем тебя новостями по этой теме!"
+	unsubscribeMessageNoSubscribes = "Дружище, а тебе даже не от чего отписываться!!"
+	unsubscribeMessage = "Воу, полегче, ковбой. Уверен что хочешь отказаться от таких классных тем?\n%s\n" +
+		"Просто <b>нажми на кнопку</b> с темой от которой хочет отписаться и мы всё сделаем!\n" +
+		"Помни что ты всегда сможешь снова запросить у нас новости по этой теме!"
+	unsubscribeConfirmMessage = "Мы успешно отписали тебя от <b>%s</b>. Помни, что ты всегда можешь возобновить подписку на данную тему! ;)"
+)
+
 var subscribeKeyboardMarkup = tgbotapi.NewInlineKeyboardMarkup(
 	tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("Бизнес", "biz"),
-		tgbotapi.NewInlineKeyboardButtonData("Развлечение", "fun"),
-		tgbotapi.NewInlineKeyboardButtonData("Общее", "gen"),
+		tgbotapi.NewInlineKeyboardButtonData("Бизнес", "business"),
+		tgbotapi.NewInlineKeyboardButtonData("Развлечение", "entertainment"),
+		tgbotapi.NewInlineKeyboardButtonData("Общее", "general"),
+	),
+	tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("Здоровье", "health"),
-		tgbotapi.NewInlineKeyboardButtonData("Наука", "sci"),
-		tgbotapi.NewInlineKeyboardButtonData("Спорт", "sport"),
-		tgbotapi.NewInlineKeyboardButtonData("Технологии", "tech"),
+		tgbotapi.NewInlineKeyboardButtonData("Наука", "science"),
+		tgbotapi.NewInlineKeyboardButtonData("Спорт", "sports"),
+		tgbotapi.NewInlineKeyboardButtonData("Технологии", "technology"),
 	),
 )
+
+func formKeyboardMarkupForUnsubscribe(tags []string) tgbotapi.InlineKeyboardMarkup {
+	var keyboardButtons []tgbotapi.InlineKeyboardButton
+	for _, tag := range tags {
+		keyboardButtons = append(keyboardButtons, tgbotapi.NewInlineKeyboardButtonData(tag, "unsub " + tag))
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(keyboardButtons...))
+}
+
+func mapModelsToRequestMap(models []db.SubscribeModel) (requestMap map[string][]int64, tagKeys []string) {
+	requestMap = make(map[string][]int64)
+	tagKeys = make([]string, 0)
+	for _, model := range models {
+		requestMap[model.Tag] = append(requestMap[model.Tag], model.UserId)
+	}
+	for key, _ := range requestMap {
+		log.Infof("adding %s key to tagKeys", key)
+		tagKeys = append(tagKeys, key)
+	}
+	return
+}
 
 func main() {
 	log.Println(cfg.TgBotApiToken)
@@ -54,8 +105,6 @@ func main() {
 		log.Fatalln("bot creation error", err)
 	}
 	log.Infof("%s bot was initialized", bot.Self.FirstName)
-
-	bot.Debug = true
 
 	_, err = bot.SetWebhook(tgbotapi.NewWebhook(cfg.TgWebhookUrl))
 	if err != nil {
@@ -69,6 +118,60 @@ func main() {
 	go http.ListenAndServe(":8080", nil)
 	log.Println("Starting to listen and serve :8080")
 
+	var s = dbConn.NewSession(nil)
+
+	go func() {
+		for _ = range time.Tick(time.Second * 45) {
+			log.Infoln("Starting ticker work ;O")
+
+			subscribeModels, err := db.SelectAllSubscribes(s)
+			if err != nil {
+				log.Errorln(err)
+			}
+			log.Infof("Got %d subscribes", len(subscribeModels))
+
+			requestMap, tagsFromRequestMap := mapModelsToRequestMap(subscribeModels)
+			log.Infof("requestMap:\n%+v\ntagsFromRequestMap[%d]:\n%+v", requestMap, len(tagsFromRequestMap),tagsFromRequestMap)
+
+			responseMap := parserClient.GetArticlesByTags(tagsFromRequestMap)
+
+			for tag, response := range responseMap {
+				log.Printf("parsing response for tag %s, found %d articles\n", tag, len(response.Articles))
+				if len(response.Articles) == 0 {
+					log.Warnln("Skipping sending article cause of 0 response")
+					continue
+				}
+				log.Infof("Forming message for users: %+v", requestMap[tag])
+				for _, userId := range requestMap[tag] {
+					for _, article := range response.Articles {
+						contains, err := db.IsSubscribeContainsTitle(s, userId, tag, article.Title)
+						if err != nil {
+							log.Errorln("db err:", err)
+							continue
+						}
+						if !contains {
+							err = db.AddReadenArticleToSubscribe(s, userId, tag, article.Title)
+							if err != nil {
+								log.Errorln("db err:", err)
+								continue
+							}
+							log.Infof("Forming message for %d", userId)
+							msgToSend := tgbotapi.NewMessage(userId, fmt.Sprintf("New %s response only for you, bro ^-^\n%s\n%s\n%s", tag,
+								article.Description, article.Url, article.UrlToImage))
+							_, err = bot.Send(msgToSend)
+							if err != nil {
+								log.Errorln("error sending message ticker:", err)
+								continue
+							}
+							break
+						}
+					}
+				}
+			}
+
+		}
+	}()
+
 	for update := range updates {
 		if update.CallbackQuery != nil{
 			log.Println("callback query", update)
@@ -76,13 +179,33 @@ func main() {
 			bot.AnswerCallbackQuery(tgbotapi.NewCallback(update.CallbackQuery.ID,update.CallbackQuery.Data))
 
 			var callbackMsg tgbotapi.MessageConfig
-			switch update.CallbackQuery.Data {
-			case "Nudes":
-				callbackMsg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf("Okay buddy, you chose %s", update.CallbackQuery.Data))
-			case "Japanese Girls":
-				callbackMsg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf("Nice choice, you chose %s", update.CallbackQuery.Data))
+			if strings.HasPrefix(update.CallbackQuery.Data, "unsub ") {
+				if err = db.DeleteSubscribeFromSubscribes(s, update.CallbackQuery.Message.Chat.ID, strings.TrimLeft(update.CallbackQuery.Data, "unsub ")); err != nil {
+					log.Errorln("error sending message:", err)
+					continue
+				}
+				callbackMsg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf(unsubscribeConfirmMessage, strings.TrimLeft(update.CallbackQuery.Data, "unsub ")))
+				callbackMsg.ParseMode = "html"
+				_, err = bot.Send(callbackMsg)
+				if err != nil {
+					log.Errorln("error sending message:", err)
+					continue
+				}
+				continue
 			}
 
+			tagToSubscribe := update.CallbackQuery.Data
+
+			err = db.InsertNewSubscribeToSubscribes(s, db.SubscribeModel{
+				UserId:         int64(update.CallbackQuery.From.ID),
+				Tag:            tagToSubscribe,
+			})
+			if err != nil {
+				log.Errorln("Unexpected error from DB:", err)
+				continue
+			}
+
+			callbackMsg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, fmt.Sprintf(confirmSubscribeMessage, tagToSubscribe))
 			_, err = bot.Send(callbackMsg)
 			if err != nil {
 				log.Errorln("error sending message:", err)
@@ -98,35 +221,37 @@ func main() {
 		var msgToSend tgbotapi.MessageConfig
 		switch update.Message.Text {
 		case "/start":
-			msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, "Хэй, факинг слэйв, выбери одну из тем для подписки, быстрееенько.")
-			msgToSend.ReplyMarkup = subscribeKeyboardMarkup
+			msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, startMessage)
+			msgToSend.ParseMode = "html"
 		case "/subscribe":
-			msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, "Окей братан ты выбрал подписаться")
-		case "/debug":
-			articles := parserClient.GetArticlesByTags([]string{"sport", "tech"})
-			log.Printf("Loaded %d tags\n%+v", len(articles), articles)
-			for tag, response := range articles {
-				if len(response.Articles) == 0 {
-					continue
-				}
-
-				msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf("New %s response only for you, bro ^-^\n%s\n%s\n%s", tag,
-					response.Articles[0].Description, response.Articles[0].Url, response.Articles[0].UrlToImage))
-				_, err = bot.Send(msgToSend)
-				if err != nil {
-					log.Errorln("error sending message from debug:", err)
-					continue
-				}
+			msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf(subscribeMessage, update.Message.Chat.FirstName))
+			msgToSend.ParseMode = "html"
+			msgToSend.ReplyMarkup = subscribeKeyboardMarkup
+		case "/unsubscribe":
+			tags, err := db.SelectUsersSubscribes(s, update.Message.Chat.ID)
+			if err != nil {
+				log.Errorln("db error:", err)
+				continue
 			}
+			if len(tags) > 0 {
+				msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, fmt.Sprintf(unsubscribeMessage, strings.Join(tags, `, `)))
+				msgToSend.ParseMode = "html"
+				msgToSend.ReplyMarkup = formKeyboardMarkupForUnsubscribe(tags)
+			} else {
+				msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, unsubscribeMessageNoSubscribes)
+			}
+		case "/help":
+			msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, helpMessage)
+			msgToSend.ParseMode = "html"
 		default:
 			msgToSend = tgbotapi.NewMessage(update.Message.Chat.ID, "Что то на богатом")
 		}
 
-		//_, err = bot.Send(msgToSend)
-		//if err != nil {
-		//	log.Errorln("error sending message:", err)
-		//	continue
-		//}
+		_, err = bot.Send(msgToSend)
+		if err != nil {
+			log.Errorln("error sending message:", err)
+			continue
+		}
 	}
 
 }
